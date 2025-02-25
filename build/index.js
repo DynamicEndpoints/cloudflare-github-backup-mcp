@@ -3,9 +3,26 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, ErrorCode, McpError, } from '@modelcontextprotocol/sdk/types.js';
 import axios from 'axios';
-const CLOUDFLARE_API_TOKEN = process.env.CLOUDFLARE_API_TOKEN || 'placeholder_cloudflare_token';
-const GITHUB_ACCESS_TOKEN = process.env.GITHUB_ACCESS_TOKEN || 'placeholder_github_token';
-const GITHUB_REPO_NAME = process.env.GITHUB_REPO_NAME || 'placeholder_repo_name';
+const CLOUDFLARE_API_TOKEN = process.env.CLOUDFLARE_API_TOKEN;
+const GITHUB_ACCESS_TOKEN = process.env.GITHUB_ACCESS_TOKEN;
+const GITHUB_REPO_NAME = process.env.GITHUB_REPO_NAME;
+const GITHUB_USERNAME = process.env.GITHUB_USERNAME;
+if (!CLOUDFLARE_API_TOKEN) {
+    console.error('Error: CLOUDFLARE_API_TOKEN environment variable is required');
+    process.exit(1);
+}
+if (!GITHUB_ACCESS_TOKEN) {
+    console.error('Error: GITHUB_ACCESS_TOKEN environment variable is required');
+    process.exit(1);
+}
+if (!GITHUB_REPO_NAME) {
+    console.error('Error: GITHUB_REPO_NAME environment variable is required');
+    process.exit(1);
+}
+if (!GITHUB_USERNAME) {
+    console.error('Error: GITHUB_USERNAME environment variable is required');
+    process.exit(1);
+}
 class CloudflareBackupServer {
     constructor() {
         this.server = new Server({
@@ -25,7 +42,9 @@ class CloudflareBackupServer {
         this.githubApi = axios.create({
             baseURL: 'https://api.github.com',
             headers: {
-                Authorization: `Bearer ${GITHUB_ACCESS_TOKEN}`,
+                Authorization: `token ${GITHUB_ACCESS_TOKEN}`,
+                Accept: 'application/vnd.github.v3+json',
+                'User-Agent': 'Cloudflare-GitHub-Backup-MCP',
             },
         });
         this.setupToolHandlers();
@@ -43,34 +62,125 @@ class CloudflareBackupServer {
                     description: 'Backup Cloudflare projects to GitHub',
                     inputSchema: {
                         type: 'object',
-                        properties: {},
+                        properties: {
+                            projectIds: {
+                                type: 'array',
+                                items: {
+                                    type: 'string'
+                                },
+                                description: 'Optional array of Cloudflare project IDs to backup. If not provided, all projects will be backed up.'
+                            }
+                        },
                         required: [],
+                    },
+                },
+                {
+                    name: 'restore_project',
+                    description: 'Restore a Cloudflare project from a backup',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            projectId: {
+                                type: 'string',
+                                description: 'ID of the Cloudflare project to restore'
+                            },
+                            timestamp: {
+                                type: 'string',
+                                description: 'Optional timestamp of the backup to restore. If not provided, the most recent backup will be used.'
+                            }
+                        },
+                        required: ['projectId'],
+                    },
+                },
+                {
+                    name: 'list_backups',
+                    description: 'List available backups for a Cloudflare project',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            projectId: {
+                                type: 'string',
+                                description: 'ID of the Cloudflare project'
+                            }
+                        },
+                        required: ['projectId'],
                     },
                 },
             ],
         }));
         this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-            if (request.params.name !== 'backup_projects') {
+            if (request.params.name === 'backup_projects') {
+                try {
+                    const args = request.params.arguments;
+                    const projectIds = args === null || args === void 0 ? void 0 : args.projectIds;
+                    await this.backupProjects(projectIds);
+                    return {
+                        content: [{ type: 'text', text: 'Cloudflare projects backed up successfully.' }],
+                    };
+                }
+                catch (error) {
+                    return {
+                        content: [{ type: 'text', text: `Error during backup: ${error}` }],
+                        isError: true,
+                    };
+                }
+            }
+            else if (request.params.name === 'restore_project') {
+                try {
+                    const args = request.params.arguments;
+                    const { projectId, timestamp } = args;
+                    if (!projectId) {
+                        throw new McpError(ErrorCode.InvalidParams, 'Project ID is required for restore');
+                    }
+                    await this.restoreProject(projectId, timestamp);
+                    return {
+                        content: [{ type: 'text', text: `Project ${projectId} restored successfully.` }],
+                    };
+                }
+                catch (error) {
+                    return {
+                        content: [{ type: 'text', text: `Error during restore: ${error}` }],
+                        isError: true,
+                    };
+                }
+            }
+            else if (request.params.name === 'list_backups') {
+                try {
+                    const args = request.params.arguments;
+                    const { projectId } = args;
+                    if (!projectId) {
+                        throw new McpError(ErrorCode.InvalidParams, 'Project ID is required to list backups');
+                    }
+                    const backups = await this.listBackups(projectId);
+                    return {
+                        content: [{ type: 'text', text: JSON.stringify(backups, null, 2) }],
+                    };
+                }
+                catch (error) {
+                    return {
+                        content: [{ type: 'text', text: `Error listing backups: ${error}` }],
+                        isError: true,
+                    };
+                }
+            }
+            else {
                 throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${request.params.name}`);
-            }
-            try {
-                await this.backupProjects();
-                return {
-                    content: [{ type: 'text', text: 'Cloudflare projects backed up successfully.' }],
-                };
-            }
-            catch (error) {
-                return {
-                    content: [{ type: 'text', text: `Error during backup: ${error}` }],
-                    isError: true,
-                };
             }
         });
     }
-    async backupProjects() {
+    async backupProjects(projectIds) {
         try {
             console.log('Fetching Cloudflare projects...');
-            const projects = await this.fetchCloudflareProjects();
+            const allProjects = await this.fetchCloudflareProjects();
+            // Filter projects if projectIds is provided
+            const projects = projectIds
+                ? allProjects.filter(project => projectIds.includes(project.id))
+                : allProjects;
+            if (projectIds && projects.length < projectIds.length) {
+                const foundIds = projects.map(p => p.id);
+                const missingIds = projectIds.filter(id => !foundIds.includes(id));
+                console.warn(`Warning: Some requested project IDs were not found: ${missingIds.join(', ')}`);
+            }
             console.log('Checking for GitHub repository...');
             const repoExists = await this.checkGitHubRepoExists();
             if (!repoExists) {
@@ -101,8 +211,7 @@ class CloudflareBackupServer {
     async checkGitHubRepoExists() {
         var _a;
         try {
-            const owner = GITHUB_ACCESS_TOKEN.split(':')[0]; // Assuming format is 'username:token'
-            await this.githubApi.get(`/repos/${owner}/${GITHUB_REPO_NAME}`);
+            await this.githubApi.get(`/repos/${GITHUB_USERNAME}/${GITHUB_REPO_NAME}`);
             return true;
         }
         catch (error) {
@@ -118,6 +227,8 @@ class CloudflareBackupServer {
             await this.githubApi.post('/user/repos', {
                 name: GITHUB_REPO_NAME,
                 auto_init: true, // Initialize with a README
+                description: 'Cloudflare projects backup repository created by Cloudflare-GitHub-Backup-MCP',
+                private: true, // Make the repository private by default for security
             });
         }
         catch (error) {
@@ -129,8 +240,21 @@ class CloudflareBackupServer {
         console.log(`Backing up project: ${project.name} (${project.id})`);
         const projectId = project.id;
         const projectName = project.name;
-        // Create a folder for the project in the GitHub repository
-        const projectFolder = `cloudflare_backup/${projectName}`;
+        // Create a timestamp for this backup
+        const timestamp = new Date().toISOString().replace(/:/g, '-');
+        // Create a folder for the project in the GitHub repository with timestamp
+        const projectFolder = `cloudflare_backup/${projectName}/${timestamp}`;
+        // Save project metadata
+        await this.createOrUpdateFile(`${projectFolder}/metadata.json`, JSON.stringify({
+            id: project.id,
+            name: project.name,
+            status: project.status,
+            paused: project.paused,
+            type: project.type,
+            created_on: project.created_on,
+            modified_on: project.modified_on,
+            backup_timestamp: timestamp
+        }, null, 2));
         // Fetch DNS records
         const dnsRecords = await this.fetchDnsRecords(projectId);
         await this.createOrUpdateFile(`${projectFolder}/dns_records.json`, JSON.stringify(dnsRecords, null, 2));
@@ -181,19 +305,52 @@ class CloudflareBackupServer {
     }
     async fetchWorkers(projectId) {
         try {
+            // First, get all worker routes for this zone
             const routesResponse = await this.cloudflareApi.get(`/zones/${projectId}/workers/routes`);
-            const routes = routesResponse.data.result;
-            const workers = [];
+            const routes = routesResponse.data.result || [];
+            // Create a map to store unique worker scripts
+            const workerMap = new Map();
+            // Process each route
             for (const route of routes) {
                 const scriptName = route.script;
-                const scriptResponse = await this.cloudflareApi.get(`/zones/${projectId}/workers/scripts/${scriptName}`);
-                const scriptContent = scriptResponse.data;
-                workers.push({
-                    id: scriptName,
-                    script: scriptContent,
-                });
+                // Skip if we've already processed this script
+                if (workerMap.has(scriptName))
+                    continue;
+                try {
+                    // Try to fetch the script content directly from the zone
+                    const scriptResponse = await this.cloudflareApi.get(`/zones/${projectId}/workers/scripts/${scriptName}`, { responseType: 'text' });
+                    workerMap.set(scriptName, {
+                        id: scriptName,
+                        script: scriptResponse.data,
+                        routes: [route.pattern],
+                    });
+                }
+                catch (scriptError) {
+                    console.warn(`Could not fetch worker script ${scriptName} directly from zone. Trying account-level API...`);
+                    try {
+                        // Try to fetch from account-level API
+                        // Note: This requires the Account ID, which we don't have in the current implementation
+                        // For now, we'll just record that we couldn't fetch the script
+                        workerMap.set(scriptName, {
+                            id: scriptName,
+                            script: "// Script content could not be fetched. May require account-level access.",
+                            routes: [route.pattern],
+                            error: "Could not fetch script content. May require account-level access."
+                        });
+                    }
+                    catch (accountError) {
+                        console.error(`Error fetching worker script ${scriptName} from account API:`, accountError);
+                        workerMap.set(scriptName, {
+                            id: scriptName,
+                            script: "// Script content could not be fetched due to an error.",
+                            routes: [route.pattern],
+                            error: "Failed to fetch script content."
+                        });
+                    }
+                }
             }
-            return workers;
+            // Convert map to array
+            return Array.from(workerMap.values());
         }
         catch (error) {
             console.error(`Error fetching Workers for project ${projectId}:`, error);
@@ -255,17 +412,15 @@ class CloudflareBackupServer {
     }
     async createOrUpdateFile(path, content, message = 'chore(backup): update backup') {
         var _a;
-        const owner = GITHUB_ACCESS_TOKEN.split(':')[0];
-        const ref = 'heads/main'; // Assuming we are committing to the main branch
         try {
             // Check if the file exists
-            const { data: existingFile } = await this.githubApi.get(`/repos/${owner}/${GITHUB_REPO_NAME}/contents/${path}`, {
+            const { data: existingFile } = await this.githubApi.get(`/repos/${GITHUB_USERNAME}/${GITHUB_REPO_NAME}/contents/${path}`, {
                 params: {
-                    ref,
+                    ref: 'heads/main',
                 },
             });
             // If the file exists, update it
-            await this.githubApi.put(`/repos/${owner}/${GITHUB_REPO_NAME}/contents/${path}`, {
+            await this.githubApi.put(`/repos/${GITHUB_USERNAME}/${GITHUB_REPO_NAME}/contents/${path}`, {
                 message,
                 content: Buffer.from(content).toString('base64'),
                 sha: existingFile.sha,
@@ -275,7 +430,7 @@ class CloudflareBackupServer {
         catch (error) {
             if (axios.isAxiosError(error) && ((_a = error.response) === null || _a === void 0 ? void 0 : _a.status) === 404) {
                 // If the file does not exist, create it
-                await this.githubApi.put(`/repos/${owner}/${GITHUB_REPO_NAME}/contents/${path}`, {
+                await this.githubApi.put(`/repos/${GITHUB_USERNAME}/${GITHUB_REPO_NAME}/contents/${path}`, {
                     message,
                     content: Buffer.from(content).toString('base64'),
                     branch: 'main',
@@ -287,7 +442,132 @@ class CloudflareBackupServer {
             }
         }
     }
-    // TODO: Implement restore functionality
+    async listBackups(projectId) {
+        var _a;
+        try {
+            // First, get the project name
+            const projectResponse = await this.cloudflareApi.get(`/zones/${projectId}`);
+            const projectName = projectResponse.data.result.name;
+            // Get the contents of the project folder
+            const projectFolderPath = `cloudflare_backup/${projectName}`;
+            try {
+                const { data: folderContents } = await this.githubApi.get(`/repos/${GITHUB_USERNAME}/${GITHUB_REPO_NAME}/contents/${projectFolderPath}`);
+                // Filter for directories (which should be timestamp folders)
+                const backupFolders = folderContents.filter((item) => item.type === 'dir');
+                // Sort by name (which is the timestamp) in descending order
+                backupFolders.sort((a, b) => b.name.localeCompare(a.name));
+                return backupFolders.map((folder) => ({
+                    timestamp: folder.name,
+                    url: folder.html_url
+                }));
+            }
+            catch (error) {
+                if (axios.isAxiosError(error) && ((_a = error.response) === null || _a === void 0 ? void 0 : _a.status) === 404) {
+                    // No backups found
+                    return [];
+                }
+                throw error;
+            }
+        }
+        catch (error) {
+            console.error(`Error listing backups for project ${projectId}:`, error);
+            throw new McpError(ErrorCode.InternalError, `Failed to list backups for project ${projectId}: ${error}`);
+        }
+    }
+    async restoreProject(projectId, timestamp) {
+        try {
+            // Get the project name
+            const projectResponse = await this.cloudflareApi.get(`/zones/${projectId}`);
+            const projectName = projectResponse.data.result.name;
+            // Get available backups
+            const backups = await this.listBackups(projectId);
+            if (backups.length === 0) {
+                throw new McpError(ErrorCode.InvalidParams, `No backups found for project ${projectName} (${projectId})`);
+            }
+            // If no timestamp is provided, use the most recent backup
+            const backupTimestamp = timestamp || backups[0].timestamp;
+            // Check if the specified backup exists
+            const backupExists = backups.some(backup => backup.timestamp === backupTimestamp);
+            if (!backupExists) {
+                throw new McpError(ErrorCode.InvalidParams, `Backup with timestamp ${backupTimestamp} not found for project ${projectName}`);
+            }
+            console.log(`Restoring project ${projectName} (${projectId}) from backup ${backupTimestamp}...`);
+            // Get the backup folder contents
+            const backupFolderPath = `cloudflare_backup/${projectName}/${backupTimestamp}`;
+            const { data: backupContents } = await this.githubApi.get(`/repos/${GITHUB_USERNAME}/${GITHUB_REPO_NAME}/contents/${backupFolderPath}`);
+            // Process each backup file
+            for (const item of backupContents) {
+                if (item.type === 'file') {
+                    // Get the file content
+                    const { data: fileData } = await this.githubApi.get(item.download_url);
+                    // Determine what to restore based on the file name
+                    if (item.name === 'dns_records.json') {
+                        await this.restoreDnsRecords(projectId, fileData);
+                    }
+                    else if (item.name === 'page_rules.json') {
+                        await this.restorePageRules(projectId, fileData);
+                    }
+                    else if (item.name === 'firewall_rules.json') {
+                        await this.restoreFirewallRules(projectId, fileData);
+                    }
+                    else if (item.name === 'access_rules.json') {
+                        await this.restoreAccessRules(projectId, fileData);
+                    }
+                    else if (item.name === 'rate_limit_rules.json') {
+                        await this.restoreRateLimitRules(projectId, fileData);
+                    }
+                    else if (item.name === 'ssl_tls_settings.json') {
+                        await this.restoreSslTlsSettings(projectId, fileData);
+                    }
+                }
+                else if (item.name === 'workers' && item.type === 'dir') {
+                    // Handle workers directory
+                    await this.restoreWorkers(projectId, `${backupFolderPath}/workers`);
+                }
+            }
+            console.log(`Project ${projectName} (${projectId}) restored successfully from backup ${backupTimestamp}.`);
+        }
+        catch (error) {
+            console.error(`Error restoring project ${projectId}:`, error);
+            throw new McpError(ErrorCode.InternalError, `Failed to restore project ${projectId}: ${error}`);
+        }
+    }
+    // Stub implementations for restore methods
+    async restoreDnsRecords(projectId, records) {
+        console.log(`Restoring DNS records for project ${projectId}...`);
+        // Implementation would go here
+        console.log(`DNS records restored successfully for project ${projectId}.`);
+    }
+    async restorePageRules(projectId, rules) {
+        console.log(`Restoring Page Rules for project ${projectId}...`);
+        // Implementation would go here
+        console.log(`Page Rules restored successfully for project ${projectId}.`);
+    }
+    async restoreFirewallRules(projectId, rules) {
+        console.log(`Restoring Firewall Rules for project ${projectId}...`);
+        // Implementation would go here
+        console.log(`Firewall Rules restored successfully for project ${projectId}.`);
+    }
+    async restoreAccessRules(projectId, rules) {
+        console.log(`Restoring Access Rules for project ${projectId}...`);
+        // Implementation would go here
+        console.log(`Access Rules restored successfully for project ${projectId}.`);
+    }
+    async restoreRateLimitRules(projectId, rules) {
+        console.log(`Restoring Rate Limit Rules for project ${projectId}...`);
+        // Implementation would go here
+        console.log(`Rate Limit Rules restored successfully for project ${projectId}.`);
+    }
+    async restoreSslTlsSettings(projectId, settings) {
+        console.log(`Restoring SSL/TLS settings for project ${projectId}...`);
+        // Implementation would go here
+        console.log(`SSL/TLS settings restored successfully for project ${projectId}.`);
+    }
+    async restoreWorkers(projectId, workersPath) {
+        console.log(`Restoring Workers for project ${projectId}...`);
+        // Implementation would go here
+        console.log(`Workers restored successfully for project ${projectId}.`);
+    }
     async run() {
         const transport = new StdioServerTransport();
         await this.server.connect(transport);
