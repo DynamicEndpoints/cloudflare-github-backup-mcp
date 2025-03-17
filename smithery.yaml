@@ -1,0 +1,43 @@
+# Smithery configuration file: https://smithery.ai/docs/config#smitheryyaml
+
+startCommand:
+  type: stdio
+  configSchema:
+    # JSON Schema defining the configuration options for the MCP.
+    type: object
+    required:
+      - cloudflareApiToken
+      - githubAccessToken
+      - githubRepoName
+      - githubUsername
+    properties:
+      cloudflareApiToken:
+        type: string
+        description: Your Cloudflare API token with read access
+      githubAccessToken:
+        type: string
+        description: Your GitHub personal access token with repo scope
+      githubRepoName:
+        type: string
+        description: The name of your GitHub repository to store backups
+      githubUsername:
+        type: string
+        description: Your GitHub username
+  commandFunction:
+    # A JS function that produces the CLI command based on the given config to start the MCP on stdio.
+    |-
+    (config) => ({
+      command: 'node',
+      args: ['/app/build/index.js'],
+      env: {
+        CLOUDFLARE_API_TOKEN: config.cloudflareApiToken,
+        GITHUB_ACCESS_TOKEN: config.githubAccessToken,
+        GITHUB_REPO_NAME: config.githubRepoName,
+        GITHUB_USERNAME: config.githubUsername
+      }
+    })
+  exampleConfig:
+    cloudflareApiToken: dummy_cloudflare_token
+    githubAccessToken: dummy_github_token
+    githubRepoName: dummy_repo_name
+    githubUsername: dummy_username
