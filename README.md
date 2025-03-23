@@ -1,5 +1,7 @@
 # Cloudflare to GitHub Backup MCP Server
 
+[![smithery badge](https://smithery.ai/badge/@DynamicEndpoints/cloudflare-github-backup-mcp)](https://smithery.ai/server/@DynamicEndpoints/cloudflare-github-backup-mcp)
+
 This is an MCP (Model Context Protocol) server that backs up Cloudflare projects to a GitHub repository.
 
 ## Prerequisites
@@ -11,6 +13,15 @@ This is an MCP (Model Context Protocol) server that backs up Cloudflare projects
 
 ## Installation
 
+### Installing via Smithery
+
+To install Cloudflare to GitHub Backup for Claude Desktop automatically via [Smithery](https://smithery.ai/server/@DynamicEndpoints/cloudflare-github-backup-mcp):
+
+```bash
+npx -y @smithery/cli install @DynamicEndpoints/cloudflare-github-backup-mcp --client claude
+```
+
+### Manual Installation
 1. Clone this repository:
    ```bash
    git clone <repository_url>
